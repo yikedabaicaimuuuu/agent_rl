@@ -1,0 +1,53 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
+runs/
+artifacts/
+
+# Data & Models
+*.csv
+*.json
+*.pkl
+*.h5
+*.pt
+*.ckpt
+data/
+outputs/
+__outputs__/
+checkpoints/
+
+# Vector DB / FAISS / cache / artifacts
+vectorstore*/ 
+**/index.faiss
+**/index.pkl
+**/index.bin
+**/*.npy
+**/*.npz
+
+# Misc
+*.out
+*.bak
+*.tmp
