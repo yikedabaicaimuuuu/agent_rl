@@ -1,5 +1,5 @@
 # agents/reasoning_agent.py
-import os, json, random, uuid
+import os, json, random, uuid, re
 import dspy
 from typing import List, Optional
 # [MOD] 你原有的工具；确保存在

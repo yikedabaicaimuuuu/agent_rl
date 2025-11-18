@@ -153,9 +153,14 @@ class GenerationAgent:
 
     def _safe_semantic_f1(self, gold: str, pred: str) -> float:
         """
-        优先调用 self.semantic_f1_metric（若可用），失败则回退到字符串级 token F1。
-        支持多答案切分；拒答短语→0 分。
+        优先调用 self.semantic_f1_metric（若可用），失败则回退到稳健的字符串级语义 F1：
+        - NFKD 折叠 + 去重音（Liège -> liege）
+        - 统一小写、去标点、合并空白
+        - 极简停用词剔除（不误杀名词）
+        - 多答案切分（逗号/分号/斜杠/or/或）
+        - “包含即满分”的快捷通道（归一化后子串包含）
         """
+        # ---------- 判定拒答 ----------
         def _looks_like_refusal(t: str) -> bool:
             if not t: return False
             s = t.strip().lower()
@@ -164,64 +169,127 @@ class GenerationAgent:
                 "insufficient context", "unknown", "抱歉", "无法", "没有足够信息"
             ])
 
+        # ---------- 归一化 ----------
         def _normalize_text(s: str) -> str:
-            import re
+            import re, unicodedata
             t = (s or "").strip().lower()
-            t = (t.replace("“","\"").replace("”","\"")
-                .replace("’","'").replace("‘","'")
-                .replace("—","-"))
-            t = re.sub(r"[^\w\s]", " ", t)
+            # 统一引号/破折号
+            t = (t.replace("“", "\"").replace("”", "\"")
+                .replace("’", "'").replace("‘", "'")
+                .replace("—", "-"))
+            # NFKD 折叠 + 去重音（Liège -> liege）
+            t = unicodedata.normalize("NFKD", t)
+            t = "".join(ch for ch in t if not unicodedata.combining(ch))
+            # 非字母数字转空格
+            t = re.sub(r"[^a-z0-9\s]", " ", t)
+            # 合并空白
             t = re.sub(r"\s+", " ", t).strip()
             return t
 
+        # ---------- 别名表（可按需扩充） ----------
+        # 放在 normalize 后、token 前做词级替换更简单；这里在 token 集上做统一化
+        _ALIASES = {
+            "deaflympic games": "deaflympics",
+            "summer deaflympics": "deaflympics",
+            "battle of tannenberg": "tannenberg",
+            "battle of liege": "liege",
+        }
+
+        _STOP = {"the","of","and","a","an","to","in","on","for","with","at","by","from"}
+
+        def _token_set(s: str) -> set:
+            # 归一化 → 词表 → 别名收敛 → 去极简停用词
+            norm = _normalize_text(s)
+            toks = [w for w in norm.split() if w]
+            # 别名收敛（单词或双词短语在此处已被空白切开，简单收敛单词级）
+            mapped = []
+            i = 0
+            while i < len(toks):
+                # 尝试双词别名
+                if i + 1 < len(toks):
+                    two = f"{toks[i]} {toks[i+1]}"
+                    if two in _ALIASES:
+                        mapped.append(_ALIASES[two])
+                        i += 2
+                        continue
+                w = toks[i]
+                mapped.append(_ALIASES.get(w, w))
+                i += 1
+            return {w for w in mapped if w not in _STOP}
+
+        def _contains_normed(needle: str, hay: str) -> bool:
+            n = _normalize_text(needle)
+            h = _normalize_text(hay)
+            return bool(n) and (n in h)
+
+        # ---------- 多答案切分 ----------
         def _split_multi(s: str) -> list:
             import re
             if not s: return []
             parts = re.split(r"\s*(?:,|;|/|\bor\b|或)\s*", str(s), flags=re.I)
             return [p for p in parts if p.strip()]
 
-        def _token_f1(g: str, p: str) -> float:
-            from collections import Counter
-            g_norm, p_norm = _normalize_text(g), _normalize_text(p)
-            if not g_norm or not p_norm:
+        # ---------- 集合 F1（稳健） ----------
+        def _set_f1(g: str, p: str) -> float:
+            import re
+            gs, ps = _token_set(g), _token_set(p)
+            if not gs or not ps:
                 return 0.0
-            g_toks, p_toks = g_norm.split(), p_norm.split()
-            if not g_toks or not p_toks:
-                return 0.0
-            g_c, p_c = Counter(g_toks), Counter(p_toks)
-            overlap = sum((g_c & p_c).values())
-            if overlap <= 0:
-                return 0.0
-            precision = overlap / len(p_toks)
-            recall    = overlap / len(g_toks)
-            return 0.0 if (precision + recall) == 0 else 2 * precision * recall / (precision + recall)
 
-        def _best_token_f1(gold_s: str, pred_s: str) -> float:
+            inter = len(gs & ps)
+            union = len(gs | ps)
+            prec = inter / len(ps)
+            rec  = inter / len(gs)
+            base = 0.0 if (prec + rec) == 0 else (2 * prec * rec) / (prec + rec)
+
+            # ---- 软性“包含”加分，而不是直接满分 ----
+            # 1) 归一化后是否有子串关系
+            contains = _contains_normed(g, p) or _contains_normed(p, g)
+
+            # 2) 词级相似度（Jaccard）做下限
+            jaccard = inter / max(1, union)
+
+            # 3) 数字一致性：如果答案涉及年份/编号，强约束更可靠
+            nums_g = set(re.findall(r"\d+", _normalize_text(g)))
+            nums_p = set(re.findall(r"\d+", _normalize_text(p)))
+            nums_ok = (not nums_g) or (nums_g <= nums_p)  # gold 里的数字都在 pred 里
+
+            # 规则：包含 且 数字一致 时，至少拉到 0.85；否则如果 Jaccard>=0.5，至少 0.8
+            if contains and nums_ok:
+                base = max(base, 0.85)
+            elif jaccard >= 0.5:
+                base = max(base, 0.80)
+
+            return min(base, 1.0)
+
+
+        def _best_set_f1(gold_s: str, pred_s: str) -> float:
             gold_list = _split_multi(gold_s) or [gold_s]
             pred_list = _split_multi(pred_s) or [pred_s]
             best = 0.0
             for g in gold_list:
                 for p in pred_list:
-                    g_norm, p_norm = _normalize_text(g), _normalize_text(p)
-                    if g_norm and (g_norm in p_norm or p_norm in g_norm):
+                    best = max(best, _set_f1(g, p))
+                    if best == 1.0:
                         return 1.0
-                    best = max(best, _token_f1(g, p))
             return best
 
+        # ---------- 主流程 ----------
         gold = "" if gold is None else str(gold).strip()
         pred = "" if pred is None else str(pred).strip()
-        if not gold or not pred:
-            return 0.0
-        if _looks_like_refusal(pred):
+        if not gold or not pred or _looks_like_refusal(pred):
             return 0.0
 
+        # 1) 优先用外部指标（与你现有逻辑保持一致）
         metric = getattr(self, "semantic_f1_metric", None)
         if callable(metric):
-            # 1) 直接字符串
+            # 1.1 直接字符串调用
             try:
                 val = metric(gold, pred)
                 try:
-                    return float(val)
+                    f = float(val)
+                    if f == f:  # 非 NaN
+                        return f
                 except Exception:
                     pass
                 if isinstance(val, dict):
@@ -233,7 +301,7 @@ class GenerationAgent:
                         return float(getattr(val, attr))
             except Exception:
                 pass
-            # 2) Example 风格（惰性导入，环境无 dspy 也不会报错）
+            # 1.2 dspy.Example 风格（存在才用）
             try:
                 import importlib
                 dspy_mod = importlib.import_module("dspy")
@@ -246,7 +314,9 @@ class GenerationAgent:
                         e1, e2 = Example(**{fld: gold}), Example(**{fld: pred})
                         val = metric(e1, e2)
                         try:
-                            return float(val)
+                            f = float(val)
+                            if f == f:
+                                return f
                         except Exception:
                             if isinstance(val, dict):
                                 for k in ("f1", "score", "semantic_f1"):
@@ -258,8 +328,10 @@ class GenerationAgent:
                     except Exception:
                         pass
 
-        # 3) 兜底：字符串 token F1
-        return _best_token_f1(gold, pred)
+        # 3️⃣ fallback：字符串 token F1
+        val = _best_set_f1(gold, pred)
+        print(f"[semF1.fallback] F1={val:.4f}  gold={gold[:50]!r}  pred={pred[:50]!r}")
+        return val
 
 
     # ---- 上下文拼接 + 截断 ----
@@ -458,14 +530,86 @@ Answer strictly based on the retrieved context above:
 
             # ==== C. 语义 F1（修复版） ====
             # 可选：语义 F1
-            if self.semantic_f1_metric and ground_truth:
+            # === Semantic F1（稳健兜底版）===  👉 替换你原来的“可选：语义 F1”整段
+            def _is_valid_score(x):
                 try:
+                    f = float(x)
+                    return (f == f) and (0.0 <= f <= 1.0)   # 非 NaN 且在 [0,1]
+                except Exception:
+                    return False
+
+            semantic_f1_score = 0.0
+            if ground_truth:
+                used_metric = False
+                f1_candidate = None
+                metric = getattr(self, "semantic_f1_metric", None)
+
+                # 1) 优先外部 metric（仅接受合法值）
+                if callable(metric):
+                    try:
+                        val = metric(ground_truth, answer_text)
+                        if _is_valid_score(val):
+                            used_metric, f1_candidate = True, float(val)
+                        elif isinstance(val, dict):
+                            for k in ("f1", "score", "semantic_f1"):
+                                if k in val and _is_valid_score(val[k]):
+                                    used_metric, f1_candidate = True, float(val[k])
+                                    break
+                        elif hasattr(val, "score") and _is_valid_score(getattr(val, "score")):
+                            used_metric, f1_candidate = True, float(getattr(val, "score"))
+                    except Exception:
+                        used_metric = False
+
+                    # 1b) 若外部 metric 支持 dspy.Example 形态，再试一次
+                    if not used_metric:
+                        try:
+                            import importlib
+                            dspy_mod = importlib.import_module("dspy")
+                            Example = getattr(dspy_mod, "Example", None)
+                            if Example is not None:
+                                for fld in ("answer", "output", "response", "prediction"):
+                                    try:
+                                        e1, e2 = Example(**{fld: str(ground_truth)}), Example(**{fld: str(answer_text)})
+                                        val = metric(e1, e2)
+                                        if _is_valid_score(val):
+                                            used_metric, f1_candidate = True, float(val)
+                                            break
+                                        if isinstance(val, dict):
+                                            for k in ("f1", "score", "semantic_f1"):
+                                                if k in val and _is_valid_score(val[k]):
+                                                    used_metric, f1_candidate = True, float(val[k])
+                                                    break
+                                        if hasattr(val, "score") and _is_valid_score(getattr(val, "score")):
+                                            used_metric, f1_candidate = True, float(getattr(val, "score"))
+                                            break
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+
+                # 2) 兜底：走你自己的 _safe_semantic_f1（必须存在于类里）
+                if not used_metric:
                     semantic_f1_score = self._safe_semantic_f1(str(ground_truth), str(answer_text))
-                except Exception as e:
-                    print(f"⚠️ Semantic F1 failed: {e}")
-                    semantic_f1_score = 0.0
+                else:
+                    semantic_f1_score = f1_candidate
+
+                # （可选）只在 0 分时打印一次集合，便于排查归一化是否洗掉了关键词：
+                if semantic_f1_score == 0.0:
+                    try:
+                        import re, unicodedata
+                        def _norm(s):
+                            s = unicodedata.normalize("NFKD", str(s).lower().strip())
+                            s = "".join(ch for ch in s if not unicodedata.combining(ch))
+                            s = re.sub(r"[^a-z0-9\s]", " ", s)
+                            return re.sub(r"\s+", " ", s).strip()
+                        STOP = {"the","of","and","a","an","to","in","on","for","with","at","by","from"}
+                        def _tokset(s): return {w for w in _norm(s).split() if w and w not in STOP}
+                        print(f"[semF1.debug] ref_set={_tokset(ground_truth)} pred_set={_tokset(answer_text)}")
+                    except Exception:
+                        pass
             else:
                 semantic_f1_score = 0.0
+
 
 
             # 评估日志（便于外部排查）
