@@ -199,6 +199,7 @@ def run_dataset_and_collect(
         traj_logger = TrajectoryLogger(out_dir=out_dir)
         # logger.start(qid=qid, query_raw=q)
         try:
+            policy_path = os.getenv("ROUTER_POLICY_PATH", "agents/router_policy.pt")
             res = run_rag_pipeline(
                 question=q,
                 retrieval_agent=retrieval_agent,
@@ -212,7 +213,7 @@ def run_dataset_and_collect(
                 gen_max_attempts=gen_max_attempts,
                 logger=traj_logger,                     # 把 logger 交给管道统一管理
                 router_device="cpu",
-                router_policy_path="agents/router_policy.pt",  # ✅ 显式告诉它用这份 BC policy
+                router_policy_path=policy_path,   # ✅ 用 env 控制
 
             )
         except Exception as e:

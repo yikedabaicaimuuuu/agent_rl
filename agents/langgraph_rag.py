@@ -682,6 +682,8 @@ def run_rag_pipeline(
 
         # === NEW: 如果成功构建了 LangGraph，就走多步 StateGraph + Router 模式 ===
     if use_router and graph is not None:
+        print("[run_rag_pipeline] 🚀 Using LangGraph StateGraph + router")
+
         # 构造初始 AgentState
         init_state: AgentState = {
             "question": question,
@@ -709,6 +711,7 @@ def run_rag_pipeline(
             "qid": qid,
             "logger": logger,
         }
+
 
         # 运行 LangGraph 多步流程
         final_state: AgentState = graph.invoke(init_state)

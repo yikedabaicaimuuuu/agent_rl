@@ -286,6 +286,25 @@ class RLRouterAgent:
         self.policy_path: Optional[str] = policy_path
         self._has_policy: bool = False                 # ✅ 新增：记录是否已成功加载
 
+        # ==== 新增：用环境变量控制模式 ====
+        # ROUTER_MODE 可选： "off" / "teacher" / "bc"
+        self.mode = os.getenv("ROUTER_MODE", "bc").lower()
+        if self.mode not in ("off", "teacher", "bc"):
+            self.mode = "bc"
+
+        # ---- off 模式：router 存在，但永远直接 end ----
+        if self.mode == "off":
+            print("🧠 RLRouterAgent in OFF mode (ROUTER_MODE=off): always choose 'end'.")
+            self.policy.eval()
+            return
+
+        # ---- teacher 模式：完全不用 BC policy，只走教师规则 ----
+        if self.mode == "teacher":
+            print("🧠 RLRouterAgent in TEACHER-RULE mode (ROUTER_MODE=teacher); ignore policy file.")
+            self.policy.eval()
+            return
+
+        # ---- bc 模式：正常加载 policy, 失败则回退 teacher rule----
         if policy_path and os.path.exists(policy_path):
             ckpt = torch.load(policy_path, map_location=self.device)
             state_dict = ckpt.get("state_dict", ckpt)
@@ -330,13 +349,26 @@ class RLRouterAgent:
     def decide(self, state: Dict[str, float], greedy: bool = True, temperature: float = 1.0) -> str:
         # 如果没模型，直接教师规则；这样 3 个 case 也能完整走通
         # ✅ 用加载结果判断，而非硬读全局常量路径
-        if not self._has_policy:
-            print("[router.decide] use TEACHER RULE (no loaded policy)")  # ← 关键提示
+        # 1) off 模式：永远直接 end，相当于“有 graph 但 router 不干预”
+        if getattr(self, "mode", "bc") == "off":
+            action = "end"
+            print("[router.decide] ROUTER_MODE=off → always 'end'")
+            if self.logger:
+                self.logger.set_router_action(action)
+            return action
+
+        # 2) teacher 模式 或 没有成功加载 policy：用教师规则
+        if self.mode == "teacher" or not getattr(self, "_has_policy", False):
+            if self.mode == "teacher":
+                print("[router.decide] ROUTER_MODE=teacher → teacher_rule")
+            else:
+                print("[router.decide] no loaded policy → fallback teacher_rule")
             a = _teacher_rule_action(state)
             if self.logger:
                 self.logger.set_router_action(a)
             return a
 
+        # 3) bc 模式 + 已有 policy：用 MLP policy
         with torch.no_grad():
             x = self._featurize(state)
             logits = self.policy(x)
@@ -348,7 +380,7 @@ class RLRouterAgent:
                 action_idx = int(probs.argmax())
 
         a = IDX2ACTION.get(action_idx, "end")
-        print(f"[router.decide] use BC POLICY action={a} (idx={action_idx})")  # ← 关键提示
+        print(f"[router.decide] ROUTER_MODE=bc + BC POLICY action={a} (idx={action_idx})")
         if self.logger:
             self.logger.set_router_action(a)
         return a
