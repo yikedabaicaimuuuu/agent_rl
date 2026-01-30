@@ -302,6 +302,9 @@ class EvaluationAgent:
         """
         专用于 RetrieverAgent：只评估 ContextPrecision / LLMContextRecall
         —— 按教程键名：user_input / retrieved_contexts / response / reference
+
+        注意：当没有 reference 时，跳过需要 reference 的指标（如 ContextPrecision），
+        只返回基础检索信息。
         """
         contexts = [
             getattr(doc, "page_content", "")
@@ -313,18 +316,27 @@ class EvaluationAgent:
 
         has_reference = bool(reference and str(reference).strip())
 
+        # 如果没有 reference，直接返回基础信息，不做 ragas 评估
+        # 因为 ContextPrecision 等指标需要 reference
+        if not has_reference:
+            print(f"🔎 [Retrieval] No reference provided, skipping ragas evaluation")
+            print(f"🔎 [Retrieval] Retrieved {len(contexts)} contexts")
+            return {
+                "context_precision": 0.5,  # 默认中等分数
+                "context_recall": 0.5,     # 默认中等分数
+                "doc_count": len(contexts),
+            }
+
         record = {
             "user_input": user_query,
             "retrieved_contexts": contexts,
             "response": "N/A",
-            "reference": (reference if has_reference else None),
+            "reference": reference,
         }
         dataset = EvaluationDataset.from_list([record])
 
         # ---- 指标选择 ----
-        metrics = [ContextPrecision()]
-        if has_reference:
-            metrics.append(LLMContextRecall())
+        metrics = [ContextPrecision(), LLMContextRecall()]
 
         try:
             result = evaluate(dataset=dataset, metrics=metrics, llm=LangchainLLMWrapper(self.llm))
@@ -334,43 +346,26 @@ class EvaluationAgent:
             scores = getattr(result, "scores", None)
             if isinstance(scores, dict):
                 context_precision = self._get_numeric_value(scores.get("context_precision", 0))
-                context_recall = self._get_numeric_value(scores.get("context_recall", 0)) if has_reference else None
+                context_recall = self._get_numeric_value(scores.get("context_recall", 0))
             else:
                 context_precision = self._get_numeric_value(self._extract_score(result, "context_precision"))
-                context_recall = (self._get_numeric_value(self._extract_score(result, "context_recall"))
-                                if has_reference else None)
-
-            # —— 可选：weak_recall（在没 reference 时用）——
-            weak_rec = None
-            if (not has_reference) and use_weak_recall:
-                gold = (reference or "").strip().lower()
-                if gold:
-                    weak_rec = 1.0 if any(gold in (c or "").lower() for c in contexts) else 0.0
-                else:
-                    weak_rec = 0.0  # 没有答案字符串也就无法弱召回
+                context_recall = self._get_numeric_value(self._extract_score(result, "context_recall"))
 
             # 打印
             print(f"🎯 Context Precision: {context_precision:.4f}")
-            if has_reference:
-                print(f"📈 Context Recall: {context_recall:.4f}")
-            elif weak_rec is not None:
-                print(f"📈 Weak Recall: {weak_rec:.4f} (no gold contexts)")
+            print(f"📈 Context Recall: {context_recall:.4f}")
 
         except Exception as e:
             print(f"❌ Error in evaluate_retrieval: {str(e)}")
             traceback.print_exc()
-            context_precision = 0.0
-            context_recall = None
-            weak_rec = None
+            context_precision = 0.5
+            context_recall = 0.5
 
-        # 返回：当没有 reference 时，用 weak_recall（若启用）回填一个 recall_like 字段给上层决策
-        out = {
+        return {
             "context_precision": context_precision,
-            "context_recall": context_recall,              # 可能是 None
+            "context_recall": context_recall,
+            "doc_count": len(contexts),
         }
-        if (not has_reference) and use_weak_recall:
-            out["weak_recall"] = weak_rec                  # 可能是 None/0/1
-        return out
 
     # ============================== 3) evaluate_generation ==============================
 

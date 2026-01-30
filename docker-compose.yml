@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # MongoDB database
+  mongodb:
+    image: mongo:7.0
+    container_name: llm-logic-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - llm-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RAG Service (your agentic RAG pipeline)
+  rag-service:
+    build:
+      context: .
+      dockerfile: rag_service/Dockerfile
+    container_name: rag-service
+    ports:
+      - "8001:8001"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - RAG_SERVICE_PORT=8001
+      - VECTORSTORE_PATH=/app/agent_integration/vectorstore-hotpot/hotpotqa_faiss
+    volumes:
+      - ./agent_integration/vectorstore-hotpot:/app/agent_integration/vectorstore-hotpot:ro
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+  # Backend (Flask API)
+  backend:
+    build:
+      context: ./LLM-logic/backend
+      dockerfile: Dockerfile
+    container_name: llm-logic-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - MONGO_URI=mongodb://mongodb:27017/flask_database
+      - RAG_SERVICE_URL=http://rag-service:8001
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rag-service:
+        condition: service_started
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./LLM-logic/frontend
+      dockerfile: Dockerfile
+    container_name: llm-logic-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:5000
+    depends_on:
+      - backend
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+networks:
+  llm-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
