@@ -1,6 +1,23 @@
 version: '3.8'
 
 services:
+  # Redis cache
+  redis:
+    image: redis:7-alpine
+    container_name: llm-logic-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - llm-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   # MongoDB database
   mongodb:
     image: mongo:7.0
@@ -29,8 +46,13 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - RAG_SERVICE_PORT=8001
       - VECTORSTORE_PATH=/app/agent_integration/vectorstore-hotpot/hotpotqa_faiss
+      - REDIS_URL=redis://redis:6379/0
+      - CACHE_TTL=3600
     volumes:
       - ./agent_integration/vectorstore-hotpot:/app/agent_integration/vectorstore-hotpot:ro
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - llm-network
     restart: unless-stopped
@@ -80,3 +102,4 @@ networks:
 
 volumes:
   mongodb_data:
+  redis_data:

@@ -3,12 +3,16 @@ RAG Service - FastAPI wrapper for the RAG pipeline
 """
 import os
 import sys
+import json
+import hashlib
 from contextlib import asynccontextmanager
 from typing import Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+import redis
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +40,39 @@ import dspy
 
 # Global agents (initialized on startup)
 _agents = {}
+
+# Redis client (initialized on startup)
+_redis_client: Optional[redis.Redis] = None
+CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # Default 1 hour
+
+
+def get_cache_key(question: str, use_router: bool) -> str:
+    """Generate a cache key from the question"""
+    content = f"{question.strip().lower()}:{use_router}"
+    return f"rag:{hashlib.md5(content.encode()).hexdigest()}"
+
+
+def get_cached_response(key: str) -> Optional[dict]:
+    """Get cached response from Redis"""
+    if _redis_client is None:
+        return None
+    try:
+        data = _redis_client.get(key)
+        if data:
+            return json.loads(data)
+    except Exception as e:
+        print(f"Redis get error: {e}")
+    return None
+
+
+def set_cached_response(key: str, response: dict) -> None:
+    """Cache response in Redis"""
+    if _redis_client is None:
+        return
+    try:
+        _redis_client.setex(key, CACHE_TTL, json.dumps(response))
+    except Exception as e:
+        print(f"Redis set error: {e}")
 
 
 class QueryRequest(BaseModel):
@@ -140,13 +177,29 @@ def init_agents():
     print("RAG Service initialized successfully!")
 
 
+def init_redis():
+    """Initialize Redis connection"""
+    global _redis_client
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    try:
+        _redis_client = redis.from_url(redis_url, decode_responses=True)
+        _redis_client.ping()
+        print(f"  - Redis connected: {redis_url}")
+    except Exception as e:
+        print(f"  - Redis connection failed: {e} (caching disabled)")
+        _redis_client = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown"""
     # Startup
+    init_redis()
     init_agents()
     yield
     # Shutdown
+    if _redis_client:
+        _redis_client.close()
     print("RAG Service shutting down...")
 
 
@@ -171,10 +224,51 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    redis_connected = False
+    if _redis_client:
+        try:
+            _redis_client.ping()
+            redis_connected = True
+        except:
+            pass
     return {
         "status": "healthy",
-        "agents_loaded": len(_agents) > 0
+        "agents_loaded": len(_agents) > 0,
+        "redis_connected": redis_connected
     }
+
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Get cache statistics"""
+    if _redis_client is None:
+        return {"enabled": False, "message": "Redis not connected"}
+    try:
+        info = _redis_client.info("stats")
+        keys = _redis_client.keys("rag:*")
+        return {
+            "enabled": True,
+            "cached_queries": len(keys),
+            "hits": info.get("keyspace_hits", 0),
+            "misses": info.get("keyspace_misses", 0),
+            "ttl_seconds": CACHE_TTL
+        }
+    except Exception as e:
+        return {"enabled": False, "error": str(e)}
+
+
+@app.delete("/cache/clear")
+async def clear_cache():
+    """Clear all cached queries"""
+    if _redis_client is None:
+        return {"success": False, "message": "Redis not connected"}
+    try:
+        keys = _redis_client.keys("rag:*")
+        if keys:
+            _redis_client.delete(*keys)
+        return {"success": True, "cleared": len(keys)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -184,6 +278,19 @@ async def query(request: QueryRequest):
     """
     if not _agents:
         raise HTTPException(status_code=503, detail="Agents not initialized")
+
+    # Check cache first
+    cache_key = get_cache_key(request.question, request.use_router)
+    cached = get_cached_response(cache_key)
+    if cached:
+        print(f"Cache HIT for: {request.question[:50]}...")
+        return QueryResponse(
+            answer=cached.get("answer", ""),
+            question=request.question,
+            success=True
+        )
+
+    print(f"Cache MISS for: {request.question[:50]}...")
 
     try:
         result = run_rag_pipeline(
@@ -196,8 +303,13 @@ async def query(request: QueryRequest):
             visualize=False
         )
 
+        answer = result.get("answer", "")
+
+        # Cache the result
+        set_cached_response(cache_key, {"answer": answer})
+
         return QueryResponse(
-            answer=result.get("answer", ""),
+            answer=answer,
             question=request.question,
             success=True
         )
