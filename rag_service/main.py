@@ -16,7 +16,9 @@ import redis
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import asyncio
 
 # Add agent_integration to path
 AGENT_INTEGRATION_PATH = os.path.join(os.path.dirname(__file__), "..", "agent_integration")
@@ -322,6 +324,89 @@ async def query(request: QueryRequest):
             success=False,
             error=str(e)
         )
+
+
+@app.post("/query/stream")
+async def query_stream(request: QueryRequest):
+    """
+    Stream the RAG pipeline response using Server-Sent Events (SSE)
+    """
+    if not _agents:
+        raise HTTPException(status_code=503, detail="Agents not initialized")
+
+    async def generate_stream():
+        import concurrent.futures
+
+        # Check cache first
+        cache_key = get_cache_key(request.question, request.use_router)
+        cached = get_cached_response(cache_key)
+
+        if cached:
+            # Stream cached response word by word
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieved from cache...'})}\n\n"
+            await asyncio.sleep(0.1)
+
+            answer = cached.get("answer", "")
+            words = answer.split()
+            for i, word in enumerate(words):
+                yield f"data: {json.dumps({'type': 'token', 'content': word + (' ' if i < len(words) - 1 else '')})}\n\n"
+                await asyncio.sleep(0.03)  # Small delay for visual effect
+
+            yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+            return
+
+        # Not cached - run the pipeline
+        yield f"data: {json.dumps({'type': 'status', 'content': 'Analyzing question...'})}\n\n"
+        await asyncio.sleep(0.2)
+
+        yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents...'})}\n\n"
+
+        # Run pipeline in thread pool to not block
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            try:
+                result = await loop.run_in_executor(
+                    pool,
+                    lambda: run_rag_pipeline(
+                        question=request.question,
+                        retrieval_agent=_agents["retrieval"],
+                        reasoning_agent=_agents["reasoning"],
+                        generation_agent=_agents["generation"],
+                        evaluation_agent=_agents["evaluation"],
+                        use_router=request.use_router,
+                        visualize=False
+                    )
+                )
+
+                answer = result.get("answer", "")
+
+                # Cache the result
+                set_cached_response(cache_key, {"answer": answer})
+
+                yield f"data: {json.dumps({'type': 'status', 'content': 'Generating response...'})}\n\n"
+                await asyncio.sleep(0.1)
+
+                # Stream answer word by word
+                words = answer.split()
+                for i, word in enumerate(words):
+                    yield f"data: {json.dumps({'type': 'token', 'content': word + (' ' if i < len(words) - 1 else '')})}\n\n"
+                    await asyncio.sleep(0.05)  # Typing effect
+
+                yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+
+            except Exception as e:
+                print(f"Error in streaming RAG pipeline: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 if __name__ == "__main__":

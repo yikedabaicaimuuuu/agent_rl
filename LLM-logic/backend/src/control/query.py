@@ -553,3 +553,45 @@ DEFAULT_PROVIDERS = {
 def get_available_providers():
     """Return information about available providers and models."""
     return DEFAULT_PROVIDERS
+
+
+def stream_rag_service(query_str: str, use_router: bool = True):
+    """
+    Stream responses from the RAG Service using Server-Sent Events.
+
+    Args:
+        query_str: The question to ask
+        use_router: Whether to use LangGraph router (default True)
+
+    Yields:
+        SSE formatted strings
+    """
+    RAG_SERVICE_URL = os.getenv("RAG_SERVICE_URL", "http://localhost:8001")
+
+    print(f"[DEBUG] Streaming from RAG Service at {RAG_SERVICE_URL}")
+
+    try:
+        response = requests.post(
+            f"{RAG_SERVICE_URL}/query/stream",
+            json={
+                "question": query_str,
+                "use_router": use_router
+            },
+            stream=True,
+            timeout=120
+        )
+        response.raise_for_status()
+
+        for line in response.iter_lines():
+            if line:
+                decoded = line.decode('utf-8')
+                if decoded.startswith('data: '):
+                    yield decoded + '\n\n'
+
+    except requests.exceptions.ConnectionError:
+        error_msg = f"RAG Service unavailable at {RAG_SERVICE_URL}"
+        print(f"[ERROR] {error_msg}")
+        yield f"data: {json.dumps({'type': 'error', 'content': error_msg})}\n\n"
+    except Exception as e:
+        print(f"[ERROR] RAG Service streaming error: {str(e)}")
+        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
