@@ -1,3 +1,8 @@
+# Environment variables (contains API keys)
+.env
+.env.local
+.env.*.local
+
 # macOS
 .DS_Store
 
@@ -46,6 +51,12 @@ vectorstore*/
 **/index.bin
 **/*.npy
 **/*.npz
+
+# Node.js
+node_modules/
+.next/
+.pnp/
+.pnp.js
 
 # Misc
 *.out

@@ -1,0 +1,1 @@
+dance_partner(x1, yulia_zagoruychenko).
