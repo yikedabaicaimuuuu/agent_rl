@@ -65,7 +65,7 @@ export const useChatHandler = () => {
       const userMessage: Message = { role: 'user', content: textInput };
       setMessages((prevMessages) => [...prevMessages, userMessage]);
 
-      // Handle RAG Agent specially - it uses its own pipeline
+      // Handle RAG Agent with streaming
       if (method === 'rag-agent') {
         const body = {
           model: 'rag-agent',
@@ -77,24 +77,111 @@ export const useChatHandler = () => {
 
         setTextInput('');
 
-        const res = await fetch('http://127.0.0.1:5001/get_response', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(body),
-        });
+        // Add placeholder bot message for streaming
+        const botMessageIndex = messages.length + 1; // +1 for user message just added
+        setMessages((prevMessages) => [...prevMessages, { role: 'bot', content: '' }]);
 
-        if (!res.ok) {
-          const errorData = await res.json();
-          throw new Error(errorData.error || 'RAG Agent request failed');
+        try {
+          const res = await fetch('http://127.0.0.1:5001/get_response_stream', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+          });
+
+          if (!res.ok) {
+            throw new Error('Streaming request failed');
+          }
+
+          const reader = res.body?.getReader();
+          const decoder = new TextDecoder();
+          let accumulatedContent = '';
+          let statusMessage = '';
+
+          if (reader) {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split('\n');
+
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  try {
+                    const jsonStr = line.slice(6).trim();
+                    if (jsonStr) {
+                      const eventData = JSON.parse(jsonStr) as {
+                        type: string;
+                        content: string;
+                      };
+
+                      if (eventData.type === 'status') {
+                        // Show status as italic text
+                        statusMessage = `_${eventData.content}_\n\n`;
+                        setMessages((prevMessages) => {
+                          const newMessages = [...prevMessages];
+                          newMessages[botMessageIndex] = {
+                            role: 'bot',
+                            content: statusMessage + accumulatedContent,
+                          };
+                          return newMessages;
+                        });
+                      } else if (eventData.type === 'token') {
+                        // Accumulate the actual answer
+                        accumulatedContent += eventData.content;
+                        setMessages((prevMessages) => {
+                          const newMessages = [...prevMessages];
+                          newMessages[botMessageIndex] = {
+                            role: 'bot',
+                            content: accumulatedContent,
+                          };
+                          return newMessages;
+                        });
+                      } else if (eventData.type === 'done') {
+                        // Streaming complete - final message is already set
+                        console.log('Streaming complete');
+                      } else if (eventData.type === 'error') {
+                        setMessages((prevMessages) => {
+                          const newMessages = [...prevMessages];
+                          newMessages[botMessageIndex] = {
+                            role: 'bot',
+                            content: `Error: ${eventData.content}`,
+                          };
+                          return newMessages;
+                        });
+                      }
+                    }
+                  } catch (parseError) {
+                    console.error('Failed to parse SSE data:', parseError);
+                  }
+                }
+              }
+            }
+          }
+        } catch (streamError) {
+          console.error('Streaming error:', streamError);
+          // Fallback to non-streaming if streaming fails
+          const res = await fetch('http://127.0.0.1:5001/get_response', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+          });
+
+          if (res.ok) {
+            const response = (await res.json()) as ChatGPTResponse;
+            const responseMessage =
+              response.choices[0]?.message?.content || 'No response from RAG Agent';
+            setMessages((prevMessages) => {
+              const newMessages = [...prevMessages];
+              newMessages[botMessageIndex] = { role: 'bot', content: responseMessage };
+              return newMessages;
+            });
+          }
         }
-
-        const response = (await res.json()) as ChatGPTResponse;
-        const responseMessage = response.choices[0]?.message?.content || 'No response from RAG Agent';
-
-        const botMessage: Message = { role: 'bot', content: responseMessage };
-        setMessages((prevMessages) => [...prevMessages, botMessage]);
         return;
       }
 

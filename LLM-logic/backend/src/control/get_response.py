@@ -1,4 +1,4 @@
-from flask import jsonify, request
+from flask import jsonify, request, Response
 import time
 import traceback
 from openai import OpenAIError
@@ -6,7 +6,7 @@ import anthropic
 import google.api_core.exceptions as GoogleAPIError
 
 from src import app
-from src.control.query import query, proslm_query, query_rag_service
+from src.control.query import query, proslm_query, query_rag_service, stream_rag_service
 from src.model.conversation_model import append_message_by_id
 
 
@@ -143,5 +143,83 @@ def get_response_control():
 
     except Exception as e:
         print(f"[ERROR] [{request_id}] Request processing error: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/get_response_stream", methods=["POST"])
+def get_response_stream_control():
+    """
+    Stream responses from the RAG Agent using Server-Sent Events.
+    """
+    start_time = time.time()
+    request_id = f"stream_req_{int(start_time)}"
+
+    print(f"\n[DEBUG] [{request_id}] ====== NEW STREAMING REQUEST ======")
+
+    try:
+        data = request.json
+        conv_id = data["conv_id"]
+        method = data.get("method", "rag-agent")
+
+        # Save user message
+        append_message_by_id(conv_id, data)
+
+        # Extract user input
+        input_text = data["messages"][-1]["content"]
+        print(f"[DEBUG] [{request_id}] User input: {input_text[:50]}...")
+
+        # Only RAG Agent supports streaming currently
+        if method != "rag-agent":
+            return jsonify({"error": "Streaming only supported for RAG Agent"}), 400
+
+        # Store complete response for saving to conversation
+        complete_response = []
+
+        def generate():
+            nonlocal complete_response
+            try:
+                for chunk in stream_rag_service(input_text, use_router=True):
+                    # Parse the chunk to accumulate the answer
+                    if chunk.startswith('data: '):
+                        try:
+                            import json
+                            json_str = chunk[6:].strip()
+                            if json_str:
+                                event_data = json.loads(json_str)
+                                if event_data.get('type') == 'token':
+                                    complete_response.append(event_data.get('content', ''))
+                        except:
+                            pass
+                    yield chunk
+
+                # After streaming completes, save the full response
+                full_response = ''.join(complete_response)
+                if full_response:
+                    save_res = {
+                        "messages": [{"role": "bot", "content": full_response}],
+                        "provider": "rag",
+                        "model": "rag-agent",
+                    }
+                    append_message_by_id(conv_id, save_res)
+                    print(f"[DEBUG] [{request_id}] Saved streaming response to conversation")
+
+            except Exception as e:
+                print(f"[ERROR] [{request_id}] Streaming error: {str(e)}")
+                yield f"data: {{'type': 'error', 'content': '{str(e)}'}}\n\n"
+
+        return Response(
+            generate(),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+                'Access-Control-Allow-Origin': '*'
+            }
+        )
+
+    except Exception as e:
+        print(f"[ERROR] [{request_id}] Stream setup error: {str(e)}")
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
