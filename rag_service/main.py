@@ -19,6 +19,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import asyncio
+import time
+
+# Prometheus metrics
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
 
 # Add agent_integration to path
 AGENT_INTEGRATION_PATH = os.path.join(os.path.dirname(__file__), "..", "agent_integration")
@@ -46,6 +51,44 @@ _agents = {}
 # Redis client (initialized on startup)
 _redis_client: Optional[redis.Redis] = None
 CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # Default 1 hour
+
+# ============================================
+# Prometheus Metrics
+# ============================================
+REQUEST_COUNT = Counter(
+    'rag_requests_total',
+    'Total number of RAG requests',
+    ['endpoint', 'status']
+)
+
+REQUEST_LATENCY = Histogram(
+    'rag_request_latency_seconds',
+    'Request latency in seconds',
+    ['endpoint'],
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0]
+)
+
+CACHE_HITS = Counter(
+    'rag_cache_hits_total',
+    'Total number of cache hits'
+)
+
+CACHE_MISSES = Counter(
+    'rag_cache_misses_total',
+    'Total number of cache misses'
+)
+
+ACTIVE_REQUESTS = Gauge(
+    'rag_active_requests',
+    'Number of currently active requests'
+)
+
+PIPELINE_STAGE_LATENCY = Histogram(
+    'rag_pipeline_stage_latency_seconds',
+    'Latency of each pipeline stage',
+    ['stage'],
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
+)
 
 
 def get_cache_key(question: str, use_router: bool) -> str:
@@ -240,6 +283,12 @@ async def health_check():
     }
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/cache/stats")
 async def cache_stats():
     """Get cache statistics"""
@@ -278,23 +327,35 @@ async def query(request: QueryRequest):
     """
     Query the RAG pipeline with a question
     """
+    start_time = time.time()
+    ACTIVE_REQUESTS.inc()
+
     if not _agents:
+        ACTIVE_REQUESTS.dec()
+        REQUEST_COUNT.labels(endpoint="/query", status="error").inc()
         raise HTTPException(status_code=503, detail="Agents not initialized")
 
-    # Check cache first
-    cache_key = get_cache_key(request.question, request.use_router)
-    cached = get_cached_response(cache_key)
-    if cached:
-        print(f"Cache HIT for: {request.question[:50]}...")
-        return QueryResponse(
-            answer=cached.get("answer", ""),
-            question=request.question,
-            success=True
-        )
-
-    print(f"Cache MISS for: {request.question[:50]}...")
-
     try:
+        # Check cache first
+        cache_key = get_cache_key(request.question, request.use_router)
+        cached = get_cached_response(cache_key)
+        if cached:
+            print(f"Cache HIT for: {request.question[:50]}...")
+            CACHE_HITS.inc()
+            REQUEST_COUNT.labels(endpoint="/query", status="success").inc()
+            REQUEST_LATENCY.labels(endpoint="/query").observe(time.time() - start_time)
+            ACTIVE_REQUESTS.dec()
+            return QueryResponse(
+                answer=cached.get("answer", ""),
+                question=request.question,
+                success=True
+            )
+
+        print(f"Cache MISS for: {request.question[:50]}...")
+        CACHE_MISSES.inc()
+
+        # Run pipeline with timing
+        pipeline_start = time.time()
         result = run_rag_pipeline(
             question=request.question,
             retrieval_agent=_agents["retrieval"],
@@ -304,11 +365,16 @@ async def query(request: QueryRequest):
             use_router=request.use_router,
             visualize=False
         )
+        PIPELINE_STAGE_LATENCY.labels(stage="full_pipeline").observe(time.time() - pipeline_start)
 
         answer = result.get("answer", "")
 
         # Cache the result
         set_cached_response(cache_key, {"answer": answer})
+
+        REQUEST_COUNT.labels(endpoint="/query", status="success").inc()
+        REQUEST_LATENCY.labels(endpoint="/query").observe(time.time() - start_time)
+        ACTIVE_REQUESTS.dec()
 
         return QueryResponse(
             answer=answer,
@@ -318,6 +384,9 @@ async def query(request: QueryRequest):
 
     except Exception as e:
         print(f"Error in RAG pipeline: {e}")
+        REQUEST_COUNT.labels(endpoint="/query", status="error").inc()
+        REQUEST_LATENCY.labels(endpoint="/query").observe(time.time() - start_time)
+        ACTIVE_REQUESTS.dec()
         return QueryResponse(
             answer="",
             question=request.question,
