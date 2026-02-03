@@ -177,7 +177,6 @@ def get_response_stream_control():
         complete_response = []
 
         def generate():
-            nonlocal complete_response
             try:
                 for chunk in stream_rag_service(input_text, use_router=True):
                     # Parse the chunk to accumulate the answer
