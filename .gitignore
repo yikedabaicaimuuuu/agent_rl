@@ -42,7 +42,7 @@ artifacts/
 *.h5
 *.pt
 *.ckpt
-data/
+/data/
 outputs/
 __outputs__/
 checkpoints/
