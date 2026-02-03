@@ -35,6 +35,9 @@ artifacts/
 # Data & Models
 *.csv
 *.json
+!package.json
+!package-lock.json
+!tsconfig.json
 *.pkl
 *.h5
 *.pt
