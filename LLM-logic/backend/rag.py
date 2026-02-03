@@ -25,7 +25,6 @@ def initialize_pinecone():
 
 @app.route('/query', methods=['POST'])
 def query():
-    global pinecone_index
     data = request.get_json()
     query_text = data['query']
     if pinecone_index is None:
