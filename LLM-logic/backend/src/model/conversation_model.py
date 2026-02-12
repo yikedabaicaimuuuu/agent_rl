@@ -122,15 +122,12 @@ def append_message_by_id(conv_id, data):
     Returns:
         True if successful, False otherwise
     """
-    update = get_all_conversations()
     prev_message = get_conversation(conv_id)
 
     if prev_message is False:
-        return jsonify({"error": "Invalid input"}), 400
-    if not update:
-        return jsonify({"error": "Invalid input"}), 400
+        return False
     if not is_valid_objectid(conv_id):
-        return jsonify({"error": "Invalid conversation ID"}), 400
+        return False
 
     msg = prev_message.get("messages", [])
     new_messages = data["messages"]

@@ -13,22 +13,30 @@ import subprocess
 import time
 import requests
 
-# Load dataset
-ucsc_passages_df = pd.read_csv(
-    "src/../dataset/passages.csv",
-    index_col=0,
-)
-ucsc_passage_data_loader = DataFrameLoader(
-    ucsc_passages_df, page_content_column="passage"
-)
-ucsc_passage_data = ucsc_passage_data_loader.load()
+# Lazy-loaded retriever to avoid heavy initialization on import
+_retriever = None
 
-# Set up text splitter and vector database
-text_splitter = CharacterTextSplitter(chunk_size=200, chunk_overlap=50)
-docs = text_splitter.split_documents(ucsc_passage_data)
-embeddings = HuggingFaceEmbeddings()
-db = FAISS.from_documents(docs, embeddings)
-retriever = db.as_retriever()
+
+def _init_retriever():
+    global _retriever
+    if _retriever is not None:
+        return _retriever
+
+    ucsc_passages_df = pd.read_csv(
+        "src/../dataset/passages.csv",
+        index_col=0,
+    )
+    ucsc_passage_data_loader = DataFrameLoader(
+        ucsc_passages_df, page_content_column="passage"
+    )
+    ucsc_passage_data = ucsc_passage_data_loader.load()
+
+    text_splitter = CharacterTextSplitter(chunk_size=200, chunk_overlap=50)
+    docs = text_splitter.split_documents(ucsc_passage_data)
+    embeddings = HuggingFaceEmbeddings()
+    db = FAISS.from_documents(docs, embeddings)
+    _retriever = db.as_retriever()
+    return _retriever
 
 # Initialize API clients
 openai_client = None
@@ -201,6 +209,7 @@ def query_gemini(prompt, system_prompt=None, model="gemini-1.5-pro-latest"):
 
 
 def proslm_query(query_str: str):
+    retriever = _init_retriever()
     retrieved_docs = retriever.invoke(query_str)
     context = format_docs(retrieved_docs)
     client = get_openai_client()
@@ -423,6 +432,7 @@ def query(
     context = ""
     if method in ["rag", "cot"]:
         print(f"[DEBUG] Retrieving documents for method: {method}")
+        retriever = _init_retriever()
         retrieved_docs = retriever.invoke(query_str)
         context = format_docs(retrieved_docs)
         print(

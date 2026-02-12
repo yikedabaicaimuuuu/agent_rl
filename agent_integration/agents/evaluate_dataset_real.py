@@ -1,5 +1,9 @@
 # ===== PASTE INTO agents/evaluate_dataset_real.py =====
 import os, json, csv, uuid, argparse, traceback
+
+# Load .env from project root so OPENAI_API_KEY is available
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 from typing import Any, Dict, List, Optional
 import statistics as st
 import math

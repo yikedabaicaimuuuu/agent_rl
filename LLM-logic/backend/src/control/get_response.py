@@ -1,4 +1,5 @@
 from flask import jsonify, request, Response
+import json
 import time
 import traceback
 from openai import OpenAIError
@@ -205,7 +206,7 @@ def get_response_stream_control():
 
             except Exception as e:
                 print(f"[ERROR] [{request_id}] Streaming error: {str(e)}")
-                yield f"data: {{'type': 'error', 'content': '{str(e)}'}}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
 
         return Response(
             generate(),
