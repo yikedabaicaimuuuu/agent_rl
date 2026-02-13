@@ -357,6 +357,22 @@ RULES:
 3. EVERY claim in your reasoning must come directly from the provided documents. Do NOT use external knowledge.
 4. If the context does not contain enough information, respond with: Answer: insufficient context
 
+Examples:
+
+Question: What government position was held by the woman who portrayed Nora in "A Doll's House"?
+Context:
+<Document 1> A Doll's House is a 1973 film. It stars Claire Bloom as Nora.
+<Document 2> Claire Bloom served as a member of the British Academy of Film and Television Arts council.
+Reasoning: <Document 1> states Claire Bloom portrayed Nora in "A Doll's House". <Document 2> notes she served on the BAFTA council.
+Answer: BAFTA council member
+
+Question: Which band has more members, Smash Mouth or Green Day?
+Context:
+<Document 1> Smash Mouth is a rock band with six members.
+<Document 2> Green Day is a punk rock band consisting of three members.
+Reasoning: <Document 1> says Smash Mouth has six members, while <Document 2> says Green Day has three. Six is more than three.
+Answer: Smash Mouth
+
 Format:
 Reasoning: <your brief chain of thought>
 Answer: <shortest factual answer>

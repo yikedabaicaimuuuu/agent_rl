@@ -49,7 +49,7 @@ A multi-agent Retrieval-Augmented Generation system for multi-hop question answe
 | HybridRetriever | `hybrid_retriever.py` | BM25 + FAISS reciprocal rank fusion |
 | CrossEncoder Reranker | `reranker.py` | `cross-encoder/ms-marco-MiniLM-L-6-v2` reranking |
 | Multi-Query | `multi_query.py` | LLM-based query variant generation |
-| GenerationAgent | `generation_agent.py` | CoT prompt + answer parsing + concise extraction |
+| GenerationAgent | `generation_agent.py` | CoT prompt + few-shot examples + answer parsing + concise extraction |
 | EvaluationAgent | `evaluation_agent.py` | Ragas-based faithfulness, relevancy, noise sensitivity |
 | LangGraph Router | `langgraph_rag.py` | State-machine orchestration with RL/BC policy routing |
 
@@ -67,13 +67,14 @@ We iteratively optimized the pipeline across **retrieval**, **chunking**, and **
 | + Concise Generation | Shortest-answer prompt + extraction LLM call | 0.493 | 46.7% | 0.700 | 63.3% | 0.497 |
 | + Embedding v3 | `text-embedding-3-small` upgrade | 0.595 | 56.7% | 0.717 | 66.7% | 0.547 |
 | + IRCoT | Iterative multi-hop retrieval (up to 4 hops) | 0.586 | 60.0% | 0.783 | 76.7% | 0.589 |
-| **+ CoT Prompt** | **Reasoning/Answer format + answer parsing** | **0.672** | **70.0%** | **0.750** | **73.3%** | **0.519** |
+| + CoT Prompt | Reasoning/Answer format + answer parsing | 0.672 | 70.0% | 0.750 | 73.3% | 0.519 |
+| **+ Few-Shot Examples** | **2 in-context examples for multi-hop reasoning** | **0.705** | **73.3%** | **0.750** | **73.3%** | **0.592** |
 
 ### Cumulative Improvement
 
 ```
-semF1:       0.416  →  0.672   (+61.5%)
-semF1 >=0.8: 33.3%  →  70.0%  (+36.7pp)
+semF1:       0.416  →  0.705   (+69.5%)
+semF1 >=0.8: 33.3%  →  73.3%  (+40.0pp)
 ctxR:        0.697  →  0.750   (+7.6%)
 ctxR >=0.8:  63.3%  →  73.3%  (+10.0pp)
 ```
@@ -106,6 +107,13 @@ ctxR >=0.8:  63.3%  →  73.3%  (+10.0pp)
 - `_parse_cot_answer()` extracts the Answer line; `_extract_concise_answer()` as fallback
 - Lowered early-stop relevancy threshold (0.6→0.4) to avoid false-positive retries on short answers
 - semF1 jump: 0.586 → 0.672 (+14.7%)
+
+**6. Few-Shot Examples** (current)
+- Added 2 in-context examples to the generation prompt demonstrating multi-hop reasoning
+- Example 1: entity linking chain (A→B→attribute) — teaches bridging across documents
+- Example 2: comparison reasoning — teaches extracting and comparing facts
+- Carefully budgeted at ~150 tokens each to fit within the 2048-token prompt limit
+- semF1: 0.672 → 0.705 (+4.9%), semF1≥0.8: 70.0% → 73.3%
 
 ### Metric Definitions
 
