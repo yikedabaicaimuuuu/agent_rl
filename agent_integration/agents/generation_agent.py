@@ -349,31 +349,63 @@ class GenerationAgent:
     # ---- 生成提示 ----
     def _build_prompt(self, question: str, context: str, attempt: int) -> str:
         instructions = """
-You are an AI assistant that answers questions strictly based on the retrieved documents.
+You are a precise QA system. Answer questions using ONLY the retrieved context below.
 
-Instructions:
-1) Extract key facts from the retrieved context.
-2) Summarize the points that directly answer the question.
-3) Write the final answer explicitly and concisely, mirroring key entities in the question.
-4) If the context is insufficient, say: "The provided context does not contain enough information to answer this question."
-Do NOT mention the retrieval process or speculate beyond the context.
+CRITICAL RULES:
+- Give the SHORTEST possible answer: a name, date, number, place, or short phrase.
+- Do NOT write full sentences unless the question explicitly asks for an explanation.
+- Do NOT repeat or paraphrase the question in your answer.
+- Do NOT add background information, qualifiers, or elaboration.
+- If the answer is an entity name, just write the name. Example: "Craig Newmark" not "The founder is Craig Newmark."
+- If multiple facts are needed, list them briefly separated by commas.
+- If the context is insufficient, say exactly: "insufficient context"
 """.strip()
         if attempt > 0:
-            instructions += f"\n(Note: This is attempt #{attempt + 1}. Improve faithfulness and concision.)"
+            instructions += (
+                f"\n(Attempt #{attempt + 1}: Be MORE concise. "
+                "Give ONLY the core answer — no surrounding words.)"
+            )
 
         prompt = f"""
 {instructions}
 
-Question:
-{question}
+Question: {question}
 
-Retrieved Context:
+Context:
 {context}
 
-Answer strictly based on the retrieved context above:
+Answer (as short as possible):
 """.strip()
 
         return safe_trim_prompt(prompt, model="gpt-3.5-turbo")
+
+    # ---- 答案压缩（后处理）----
+    def _extract_concise_answer(self, question: str, verbose_answer: str) -> str:
+        """
+        用 LLM 从冗长回答中提取最精简的核心答案。
+        若失败则返回原答案。
+        """
+        if not verbose_answer or len(verbose_answer.split()) <= 5:
+            return verbose_answer  # 已经足够短
+
+        extract_prompt = (
+            "Extract ONLY the core factual answer from the response below. "
+            "Return just the entity name, date, number, or shortest phrase that "
+            "directly answers the question. No explanation, no full sentences.\n\n"
+            f"Question: {question}\n"
+            f"Response: {verbose_answer}\n\n"
+            "Core answer:"
+        )
+        try:
+            msg = self.llm.invoke(extract_prompt)
+            extracted = (getattr(msg, "content", "") or str(msg)).strip()
+            # 只用抽取结果如果它比原答案更短且非空
+            if extracted and len(extracted) < len(verbose_answer) * 0.8:
+                print(f"[AnswerExtract] '{verbose_answer[:60]}' → '{extracted}'")
+                return extracted
+        except Exception:
+            pass
+        return verbose_answer
 
     # ---- 主流程 ----
 
@@ -479,6 +511,10 @@ Answer strictly based on the retrieved context above:
                 answer_text = "[NO_ANSWER_GENERATED]"
                 if self.logger:
                     self.logger.add_reason(f"[gen.error] {type(e).__name__}: {e}")
+
+            # ---- 答案压缩（后处理）----
+            if answer_text and answer_text != "[NO_ANSWER_GENERATED]":
+                answer_text = self._extract_concise_answer(question, answer_text)
 
             # 生成日志
             if self.logger:
