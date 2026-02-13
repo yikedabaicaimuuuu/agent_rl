@@ -1,6 +1,7 @@
 # main-hotpot.py
 
 import os
+import functools
 from tqdm import tqdm
 import numpy as np
 from decimal import Decimal
@@ -10,6 +11,9 @@ from agents.reasoning_agent import ReasoningAgent
 from agents.retrieval_agent import RetrievalAgent
 from agents.evaluation_agent import EvaluationAgent
 from agents.generation_agent import GenerationAgent
+from agents.hybrid_retriever import HybridRetriever
+from agents.reranker import create_cross_encoder_reranker
+from agents.multi_query import generate_query_variants
 
 # ====== run_rag_pipeline 导入（优先根目录，其次 agents/）======
 try:
@@ -223,10 +227,26 @@ def main():
 
     reasoning_agent = ReasoningAgent()                 # 内部已配置 dspy
     evaluation_agent = EvaluationAgent(llm=eval_llm)   # 评估走 eval_llm（云端优先）
+
+    # --- Phase 1: Hybrid retriever (BM25 + FAISS + RRF) ---
+    hybrid_retriever = HybridRetriever(vectorstore)
+
+    # --- Phase 2: Cross-encoder reranker ---
+    reranker = create_cross_encoder_reranker(
+        model_name=os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        top_n=int(os.getenv("RERANKER_TOP_N", "5")),
+    )
+
+    # --- Phase 3: Multi-query expansion ---
+    multi_query_fn = functools.partial(generate_query_variants, llm=gen_llm, n_variants=2)
+
     retrieval_agent = RetrievalAgent(
         vectorstore=vectorstore,
         evaluation_agent=evaluation_agent,
-        top_k=int(os.getenv("RETR_TOP_K", "3"))
+        top_k=int(os.getenv("RETR_TOP_K", "8")),
+        hybrid_retriever=hybrid_retriever,
+        reranker=reranker,
+        multi_query_fn=multi_query_fn,
     )
     generation_agent = GenerationAgent(
         llm=gen_llm,

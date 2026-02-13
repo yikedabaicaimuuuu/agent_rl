@@ -8,11 +8,16 @@ from typing import Any, Dict, List, Optional
 import statistics as st
 import math
 
+import functools
+
 from agents.langgraph_rag import run_rag_pipeline
 from agents.retrieval_agent import RetrievalAgent
 from agents.generation_agent import GenerationAgent
 from agents.evaluation_agent import EvaluationAgent
 from agents.reasoning_agent import ReasoningAgent
+from agents.hybrid_retriever import HybridRetriever
+from agents.reranker import create_cross_encoder_reranker
+from agents.multi_query import generate_query_variants
 from utils.trajectory_logger import TrajectoryLogger
 
 # --- 用 FAISS 加载你的向量库 ---
@@ -179,7 +184,23 @@ def run_dataset_and_collect(
     evaluation_agent = EvaluationAgent()  # 如需 llm 后面再注入
     reasoning_agent  = ReasoningAgent()
     generation_agent = GenerationAgent()  # 如需 llm 后面再注入
-    retrieval_agent  = RetrievalAgent(vectorstore, evaluation_agent, top_k=retriever_top_k)
+
+    # --- 混合检索 + 重排 + 多查询 ---
+    hybrid_retriever = HybridRetriever(vectorstore)
+    reranker = create_cross_encoder_reranker(
+        model_name=os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        top_n=int(os.getenv("RERANKER_TOP_N", "5")),
+    )
+    # multi_query 需要 LLM；generation_agent 内部有 llm 属性
+    _mq_llm = getattr(generation_agent, "llm", None)
+    multi_query_fn = functools.partial(generate_query_variants, llm=_mq_llm, n_variants=2) if _mq_llm else None
+
+    retrieval_agent = RetrievalAgent(
+        vectorstore, evaluation_agent, top_k=retriever_top_k,
+        hybrid_retriever=hybrid_retriever,
+        reranker=reranker,
+        multi_query_fn=multi_query_fn,
+    )
 
     # CSV 表头
     csv_fields = [
