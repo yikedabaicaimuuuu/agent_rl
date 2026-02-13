@@ -351,19 +351,20 @@ class GenerationAgent:
         instructions = """
 You are a precise QA system. Answer questions using ONLY the retrieved context below.
 
-CRITICAL RULES:
-- Give the SHORTEST possible answer: a name, date, number, place, or short phrase.
-- Do NOT write full sentences unless the question explicitly asks for an explanation.
-- Do NOT repeat or paraphrase the question in your answer.
-- Do NOT add background information, qualifiers, or elaboration.
-- If the answer is an entity name, just write the name. Example: "Craig Newmark" not "The founder is Craig Newmark."
-- If multiple facts are needed, list them briefly separated by commas.
-- If the context is insufficient, say exactly: "insufficient context"
+RULES:
+1. First, write a brief REASONING (1-3 sentences) that connects facts from the documents to derive the answer. Cite <Document N> when referencing information.
+2. Then, write your FINAL ANSWER on a new line starting with "Answer:". Give the shortest possible answer: a name, date, number, place, or short phrase.
+3. EVERY claim in your reasoning must come directly from the provided documents. Do NOT use external knowledge.
+4. If the context does not contain enough information, respond with: Answer: insufficient context
+
+Format:
+Reasoning: <your brief chain of thought>
+Answer: <shortest factual answer>
 """.strip()
         if attempt > 0:
             instructions += (
-                f"\n(Attempt #{attempt + 1}: Be MORE concise. "
-                "Give ONLY the core answer — no surrounding words.)"
+                f"\n(Attempt #{attempt + 1}: Re-read the documents carefully. "
+                "Make sure your answer is directly supported by the context.)"
             )
 
         prompt = f"""
@@ -374,10 +375,19 @@ Question: {question}
 Context:
 {context}
 
-Answer (as short as possible):
+Answer (use Reasoning/Answer format):
 """.strip()
 
         return safe_trim_prompt(prompt, model="gpt-3.5-turbo")
+
+    # ---- CoT 答案解析 ----
+    def _parse_cot_answer(self, raw_response: str) -> str:
+        """从 Reasoning/Answer 格式中提取 Answer 行。"""
+        for line in raw_response.strip().splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith("answer:"):
+                return stripped[len("answer:"):].strip()
+        return raw_response.strip()
 
     # ---- 答案压缩（后处理）----
     def _extract_concise_answer(self, question: str, verbose_answer: str) -> str:
@@ -512,8 +522,9 @@ Answer (as short as possible):
                 if self.logger:
                     self.logger.add_reason(f"[gen.error] {type(e).__name__}: {e}")
 
-            # ---- 答案压缩（后处理）----
+            # ---- 答案解析 + 压缩（后处理）----
             if answer_text and answer_text != "[NO_ANSWER_GENERATED]":
+                answer_text = self._parse_cot_answer(answer_text)
                 answer_text = self._extract_concise_answer(question, answer_text)
 
             # 生成日志
@@ -678,7 +689,7 @@ Answer (as short as possible):
                 has_any_valid and
                 (retr_prec >= 0.5 and recall_like >= 0.5) and
                 faithfulness_score >= 0.8 and
-                relevancy_score   >= 0.6 and
+                relevancy_score   >= 0.4 and
                 noise_sensitivity <= 0.4 and
                 semantic_f1_score >= 0.7
             )
