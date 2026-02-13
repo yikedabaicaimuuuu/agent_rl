@@ -32,6 +32,8 @@ class RetrievalAgent:
         dedupe: bool = True,
         min_score: Optional[float] = None,   # 🔹可选：过滤低分命中
         obs_snippet_len: int = 200,          # 🔹记录到 logger 的摘要长度
+        hybrid_retriever=None,               # 🔹HybridRetriever 实例
+        multi_query_fn: Optional[Callable] = None,  # 🔹query -> [query_variants]
     ):
         """
         Args:
@@ -53,6 +55,8 @@ class RetrievalAgent:
         self.dedupe = dedupe
         self.min_score = min_score
         self.obs_snippet_len = max(0, int(obs_snippet_len))
+        self.hybrid_retriever = hybrid_retriever
+        self.multi_query_fn = multi_query_fn
 
     # ---- 文本 / 元信息抽取 ----
     def _doc_text(self, d) -> str:
@@ -247,13 +251,30 @@ class RetrievalAgent:
         """
         t0 = time.time()
 
-        # 1) 调用 retriever
-        try:
+        # 1) Build list of queries (multi-query expansion if configured)
+        queries = [query]
+        if self.multi_query_fn:
             try:
-                raw = self.retriever.invoke(query)
+                queries = self.multi_query_fn(query)
             except Exception:
-                raw = self.retriever.get_relevant_documents(query)
-            docs = self._normalize_docs(raw)
+                queries = [query]
+
+        # 2) Retrieve documents for each query variant, merge results
+        try:
+            all_docs = []
+            for q in queries:
+                if self.hybrid_retriever is not None:
+                    # Hybrid BM25 + FAISS path
+                    q_docs = self.hybrid_retriever.retrieve(q, k=self.top_k)
+                    all_docs.extend(q_docs)
+                else:
+                    # Original FAISS-only path
+                    try:
+                        raw = self.retriever.invoke(q)
+                    except Exception:
+                        raw = self.retriever.get_relevant_documents(q)
+                    all_docs.extend(self._normalize_docs(raw))
+            docs = all_docs
         except Exception as e:
             if self.logger:
                 self.logger.add_tool_call(type="retrieval_error", query=query, topk=self.top_k, error=str(e))
@@ -265,21 +286,24 @@ class RetrievalAgent:
                 "hits_meta": []
             }
 
-        # 2) 可选重排
+        # 3) 可选重排
         if self.reranker and docs:
             try:
+                docs = self.reranker(query, docs)
+            except TypeError:
+                # Fallback: old-style reranker that takes only docs
                 docs = self.reranker(docs)
             except Exception:
                 pass
 
-        # 3) 去重 + 低分过滤
+        # 4) 去重 + 低分过滤
         docs = self._dedupe_docs(docs or [])
         docs = self._filter_by_min_score(docs)
 
         latency_ms = (time.time() - t0) * 1000.0
         hits_meta = self._hits_meta(docs)
 
-        # 4) 记录调用
+        # 5) 记录调用
         if self.logger:
             self.logger.add_tool_call(
                 type="retrieval",
@@ -304,7 +328,7 @@ class RetrievalAgent:
                 "hits_meta": hits_meta
             }
 
-        # 5) 评估检索效果（ctx-P / ctx-R）
+        # 6) 评估检索效果（ctx-P / ctx-R）
         eval_result = self.evaluation_agent.evaluate_retrieval(
             user_query=query,
             retrieved_docs=docs,
