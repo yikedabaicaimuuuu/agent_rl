@@ -576,6 +576,71 @@ def create_rag_graph(
 
 
 # -----------------------------
+# IRCoT iterative multi-hop retrieval
+# -----------------------------
+def _ircot_retrieve(question, retrieval_agent, llm, max_hops=3, top_k_per_hop=5, logger=None):
+    """IRCoT 迭代检索：每一跳从已检索文档中提取中间推理，构造下一跳 query。"""
+    all_docs = []
+    seen_contents = set()
+    reasoning_trace = ""
+
+    for hop in range(max_hops):
+        if hop == 0:
+            hop_query = question
+        else:
+            # 根据已有信息生成下一跳 query
+            cot_prompt = (
+                "Based on the question and information gathered so far, "
+                "determine what to search for next.\n\n"
+                f"Question: {question}\n\n"
+                f"Information gathered so far:\n{reasoning_trace}\n\n"
+                "What specific entity, fact, or relationship do we still need to find? "
+                "Write a SHORT search query (under 20 words) to find this missing information. "
+                "If we already have enough information, respond with exactly: DONE\n\n"
+                "Search query:"
+            )
+            resp = llm.invoke(cot_prompt)
+            hop_query = (getattr(resp, "content", None) or str(resp)).strip()
+            if "DONE" in hop_query.upper():
+                break
+
+        # 检索（不传 reference，中间跳无需评估）
+        retrieval_agent.set_top_k(top_k_per_hop)
+        ret = retrieval_agent.retrieve(hop_query) or {}
+        hop_docs = ret.get("docs", [])
+
+        # 去重累积
+        for d in hop_docs:
+            content = getattr(d, "page_content", None) or str(d)
+            if content not in seen_contents:
+                seen_contents.add(content)
+                all_docs.append(d)
+
+        if not hop_docs:
+            break
+
+        # 从本跳结果中提取中间推理
+        snippets = "\n".join(
+            (getattr(d, "page_content", "") or "")[:300] for d in hop_docs[:3]
+        )
+        extract_prompt = (
+            f"Question: {question}\n\n"
+            f"New retrieved information:\n{snippets}\n\n"
+            f"Previously gathered:\n{reasoning_trace or '(none)'}\n\n"
+            "Write a brief note (1-2 sentences): what do we now know, "
+            "and what's still missing to answer the question?"
+        )
+        resp = llm.invoke(extract_prompt)
+        hop_reasoning = (getattr(resp, "content", None) or str(resp)).strip()
+        reasoning_trace += f"\n[Hop {hop+1}] {hop_reasoning}"
+
+        if logger and getattr(logger, "started", False):
+            logger.add_reason(f"[ircot.hop{hop+1}] query='{hop_query}' → {len(hop_docs)} docs")
+
+    return all_docs
+
+
+# -----------------------------
 # Run RAG process
 # -----------------------------
 def run_rag_pipeline(
@@ -783,30 +848,16 @@ def run_rag_pipeline(
         if logger and getattr(logger, "started", False):
             logger.add_eval(context_precision=0.0, context_recall=0.0, doc_count=0.0)
 
-    # 2b) 轻量检索重试
+    # 2b) 多策略检索重试
     ctx_recall = extract_scalar(metrics.get("context_recall", 0.0) or 0.0)
-    need_retry = (not docs) or (ctx_recall == 0.0)
+    need_retry = (not docs) or (ctx_recall < 0.5)
     metrics["retrieval_retry_triggered"] = bool(need_retry)
 
     if need_retry:
         r2_t0 = time.time()
         base_q = (refined_query or question or "").strip()
-        short_query = " ".join(base_q.split()[:8]) if base_q else (question or "")
         if logger and getattr(logger, "started", False):
-            logger.add_reason(f"[retrieval.retry] short_query='{short_query}'  prev_ctxR={ctx_recall:.2f}")
-
-        prev_k = getattr(retrieval_agent, "top_k", 3)
-        try:
-            retrieval_agent.set_top_k(min(8, max(1, int(prev_k) + 2)))
-        except Exception:
-            pass
-
-        try:
-            ret2 = retrieval_agent.retrieve(short_query, reference=reference) or {}
-        except Exception as e:
-            if logger and getattr(logger, "started", False):
-                logger.add_reason(f"[retrieval.retry.error] {e}")
-            ret2 = {"docs": [], "context_precision": 0.0, "context_recall": 0.0, "latency_ms": 0.0}
+            logger.add_reason(f"[retrieval.retry] prev_ctxR={ctx_recall:.2f}")
 
         def _score_tuple(r):
             try:
@@ -817,18 +868,97 @@ def run_rag_pipeline(
             r_docs = len(r.get("docs", []) or [])
             return (r_ctxR, r_ctxP, r_docs)
 
-        s1 = _score_tuple(ret)
-        s2 = _score_tuple(ret2)
+        best_ret = ret
+        best_score = _score_tuple(ret)
         took_retry = False
-        if s2 > s1:
-            ret = ret2
-            took_retry = True
+        prev_k = getattr(retrieval_agent, "top_k", 3)
+        llm = getattr(generation_agent, "llm", None)
+
+        # --- 策略 1: IRCoT 迭代多跳检索 ---
+        ircot_docs = []
+        if llm is not None:
+            try:
+                ircot_docs = _ircot_retrieve(
+                    question=base_q,
+                    retrieval_agent=retrieval_agent,
+                    llm=llm,
+                    max_hops=3,
+                    top_k_per_hop=min(6, max(1, int(prev_k))),
+                    logger=logger,
+                )
+            except Exception as e:
+                if logger and getattr(logger, "started", False):
+                    logger.add_reason(f"[retrieval.retry.ircot.error] {e}")
+
+        if ircot_docs:
+            # 与初始检索文档合并去重
+            merged = list(docs) + ircot_docs
+            seen = set()
+            deduped = []
+            for d in merged:
+                content = getattr(d, "page_content", None) or str(d)
+                if content not in seen:
+                    seen.add(content)
+                    deduped.append(d)
+            # 评估合并后的文档
+            ret_ircot = {"docs": deduped, "context_precision": 0.0, "context_recall": 0.0}
+            if evaluation_agent is not None and reference:
+                try:
+                    eval_res = evaluation_agent.evaluate_retrieval(
+                        user_query=base_q, retrieved_docs=deduped, reference=reference
+                    )
+                    ret_ircot["context_precision"] = extract_scalar(eval_res.get("context_precision", 0.0) or 0.0)
+                    ret_ircot["context_recall"] = extract_scalar(eval_res.get("context_recall", 0.0) or 0.0)
+                except Exception:
+                    pass
+            s_ircot = _score_tuple(ret_ircot)
+            if s_ircot > best_score:
+                best_ret = ret_ircot
+                best_score = s_ircot
+                took_retry = True
+                if logger and getattr(logger, "started", False):
+                    logger.add_reason(f"[retrieval.retry.ircot] improved ctxR={s_ircot[0]:.2f}")
+
+        # --- 策略 2: 关键词回退 ---
+        if best_score[0] < 0.5:
+            kw_query = ""
+            if llm is not None:
+                try:
+                    kw_prompt = (
+                        "Extract the 2-4 most important named entities or keywords "
+                        "from this question. Return them as a single search query.\n\n"
+                        f"Question: {base_q}"
+                    )
+                    resp = llm.invoke(kw_prompt)
+                    kw_query = (getattr(resp, "content", None) or str(resp)).strip()
+                except Exception:
+                    pass
+            if not kw_query:
+                kw_query = " ".join(base_q.split()[:8]) if base_q else (question or "")
+
+            if logger and getattr(logger, "started", False):
+                logger.add_reason(f"[retrieval.retry.keyword] kw_query='{kw_query}'")
+
+            try:
+                retrieval_agent.set_top_k(min(12, max(1, int(prev_k) + 4)))
+                ret_kw = retrieval_agent.retrieve(kw_query, reference=reference) or {}
+                s_kw = _score_tuple(ret_kw)
+                if s_kw > best_score:
+                    best_ret = ret_kw
+                    best_score = s_kw
+                    took_retry = True
+                    if logger and getattr(logger, "started", False):
+                        logger.add_reason(f"[retrieval.retry.keyword] improved ctxR={s_kw[0]:.2f}")
+            except Exception as e:
+                if logger and getattr(logger, "started", False):
+                    logger.add_reason(f"[retrieval.retry.keyword.error] {e}")
 
         try:
             retrieval_agent.set_top_k(prev_k)
         except Exception:
             pass
 
+        ret = best_ret
         metrics["retrieval_retry_taken"] = bool(took_retry)
         metrics["retrieval_retry_time"] = round((time.time() - r2_t0) * 1000.0, 2)
 
