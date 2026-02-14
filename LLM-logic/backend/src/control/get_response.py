@@ -66,20 +66,9 @@ def get_response_control():
                 print(f"[ERROR] [{request_id}] RAG Agent error: {str(e)}")
                 return jsonify({"error": f"RAG Agent Error: {str(e)}"}), 500
         elif method == "pro-slm":
-            try:
-                result = proslm_query(input_text)
-                response_json = {"choices": [{"message": {"content": result}}]}
-
-                save_res = {
-                    "messages": [{"role": "bot", "content": result}],
-                    "provider": "openai",
-                    "model": "openai",
-                }
-
-                append_message_by_id(conv_id, save_res)
-                return jsonify(response_json)
-            except:
-                print("Error in ProSLM")
+            result = "The 'Pro-SLM' method is not available. Please use 'std' (standard LLM) or select RAG Agent."
+            response_json = {"choices": [{"message": {"content": result}}]}
+            return jsonify(response_json)
 
         print(f"[DEBUG] [{request_id}] Processed method: {processed_method}")
 

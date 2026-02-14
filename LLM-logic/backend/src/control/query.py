@@ -428,6 +428,13 @@ def query(
 
     actual_model = model
 
+    # Methods that depend on the removed UCSC FAQ dataset are no longer available
+    UNAVAILABLE_METHODS = {"rag", "cot", "proslm"}
+    if method in UNAVAILABLE_METHODS:
+        msg = f"The '{method}' method is not available. Please use 'std' (standard LLM) or select RAG Agent."
+        print(f"[DEBUG] {msg}")
+        return msg, provider, model or "N/A"
+
     # Get relevant documents for RAG and CoT methods
     context = ""
     if method in ["rag", "cot"]:
