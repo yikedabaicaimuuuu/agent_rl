@@ -1,8 +1,41 @@
-# Agentic RAG Pipeline with Iterative Optimization
+# LLM Logic + Agentic RAG Integration
 
-A multi-agent Retrieval-Augmented Generation system for multi-hop question answering, evaluated on [HotpotQA](https://hotpotqa.github.io/). The project integrates with a full-stack LLM chat application supporting multiple providers (OpenAI, Claude, Gemini).
+A multi-model LLM chat application with an integrated agentic RAG (Retrieval-Augmented Generation) pipeline, evaluated on [HotpotQA](https://hotpotqa.github.io/) multi-hop question answering.
 
-## Pipeline Architecture
+## Full-Stack Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                      Frontend                            │
+│              (Next.js - Port 3000)                       │
+│   Model Selection: [OpenAI] [Claude] [Gemini] [RAG Agent]│
+└──────────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                   Main Backend                           │
+│               (Flask - Port 5000)                        │
+│  /get_response                                           │
+│    ├─ provider=openai  → OpenAI API                     │
+│    ├─ provider=claude  → Anthropic API                  │
+│    ├─ provider=gemini  → Google API                     │
+│    └─ method=rag-agent → RAG Service                    │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                    RAG Service                           │
+│               (FastAPI - Port 8001)                      │
+│  Agentic RAG Pipeline:                                   │
+│  - ReasoningAgent (Query Optimization)                   │
+│  - RetrievalAgent (FAISS Vector Search)                 │
+│  - GenerationAgent (Answer Generation)                   │
+│  - EvaluationAgent (Quality Assessment)                  │
+│  - LangGraph Router (Multi-step Reasoning)              │
+└─────────────────────────────────────────────────────────┘
+```
+
+## RAG Pipeline Architecture
 
 ```
                          User Query
@@ -132,8 +165,10 @@ ctxR >=0.8:  63.3%  →  73.3%  (+10.0pp)
 ### Prerequisites
 
 - Python 3.10+
-- OpenAI API Key (for embeddings + generation)
 - Docker and Docker Compose (for full-stack deployment)
+- OpenAI API Key (required for embeddings + generation)
+- Anthropic API Key (optional, for Claude)
+- Google API Key (optional, for Gemini)
 
 ### Run Evaluation
 
@@ -165,6 +200,39 @@ docker-compose up --build
 - **Frontend**: http://localhost:3000
 - **Backend API**: http://localhost:5000
 - **RAG Service**: http://localhost:8001
+
+### Local Development
+
+```bash
+# Backend (Flask)
+cd LLM-logic/backend
+pip install -r requirements.txt
+python app.py
+
+# Frontend (Next.js)
+cd LLM-logic/frontend
+pnpm install
+pnpm dev
+
+# RAG Service (FastAPI)
+cd rag_service
+pip install -r requirements.txt
+python main.py
+```
+
+## Available Models
+
+### LLM Providers
+- **OpenAI**: GPT-4o-mini, GPT-4o, GPT-3.5-turbo
+- **Claude**: Claude 3 Opus, Sonnet, Haiku
+- **Gemini**: Gemini 1.5 Pro, Flash
+
+### Methods
+- **RAG Agent**: Multi-step agentic RAG pipeline with reasoning and evaluation
+- **Pro-SLM**: Prolog-based symbolic reasoning
+- **RAG**: Simple retrieval-augmented generation
+- **Chain of Thought**: Step-by-step reasoning
+- **Standard**: Direct LLM query
 
 ## Project Structure
 
@@ -205,6 +273,8 @@ agent_rl/
 | `/get_response` | POST | Send message and get LLM response |
 | `/new_conversation` | POST | Create new conversation |
 | `/conversation/<id>` | GET | Get conversation by ID |
+| `/user` | POST | Create new user |
+| `/login` | POST | User login |
 
 ### RAG Service API
 
@@ -212,6 +282,14 @@ agent_rl/
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/query` | POST | Query the RAG pipeline |
+
+## Customizing the Vector Database
+
+The RAG Service uses FAISS for vector search. To use a different dataset:
+
+1. Build your FAISS index using OpenAI embeddings
+2. Update `VECTORSTORE_PATH` in your environment
+3. Restart the RAG Service
 
 ## License
 
